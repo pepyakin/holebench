@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
+use io_uring::{opcode, types, IoUring};
 use rand::seq::SliceRandom;
 use std::{
     fs::{File, OpenOptions},
@@ -65,41 +66,55 @@ fn main() -> Result<()> {
         junk: JunkBuf::new(cli.bs.to_bytes() as usize, &mut rng),
     });
 
-    let layout_thread_num = 4;
-    let chunk_sz = total_chunks / layout_thread_num;
-    let threads: Vec<_> = gd
-        .pos
-        .chunks(chunk_sz as usize)
-        .enumerate()
-        .map(|(job_id, chunk)| {
-            let td = ThreadData {
-                job_id,
-                gd: gd.clone(),
-                pos: chunk.to_vec(),
+    const DEPTH: u32 = 1024;
+    let mut ring = IoUring::new(DEPTH)?;
+
+    let mut pos = gd.pos.iter().copied();
+    let mut inflight = 0;
+    let mut remaining = gd.pos.len();
+    loop {
+        ring.submission().sync();
+        while !ring.submission().is_full() {
+            let Some(offset) = pos.next() else {
+                break;
             };
-            std::thread::spawn(move || write_chunks(&td))
-        })
-        .collect();
-    threads
-        .into_iter()
-        .map(|t| t.join().unwrap())
-        .collect::<Result<_, _>>()?;
-
-    Ok(())
-}
-
-fn write_chunks(td: &ThreadData) -> Result<(), anyhow::Error> {
-    let mut rng = rng();
-    for (index, &ofs) in td.pos.iter().enumerate() {
-        let buf = td.gd.junk.rand(&mut rng);
-        td.gd.file.write_all_at(&buf, ofs).with_context(|| {
-            format!(
-                "failed to write to {}, job_id={}, index={index}, offset={ofs}",
-                td.gd.filename.display(),
-                td.job_id,
+            let buf = gd.junk.rand(&mut rng);
+            let wrt_e = opcode::Write::new(
+                types::Fd(file.as_raw_fd()),
+                buf.as_ptr(),
+                buf.len() as _,
             )
-        })?;
+            .build()
+            .user_data(offset as _);
+            unsafe {
+                // unwrap: we know the ring is not full
+                ring.submission().push(&wrt_e).unwrap();
+            }
+            inflight += 1;
+        }
+
+        // Nothing was submitted this round. If there are no inflight operations, we are done.
+        if inflight == 0 {
+            break;
+        }
+
+        ring.submission().sync();
+        ring.submit_and_wait(1)?;
+
+        ring.completion().sync();
+        while let Some(cqe) = ring.completion().next() {
+            if cqe.result() < 0 {
+                bail!("write failed: {}", cqe.result());
+            }
+            inflight -= 1;
+            remaining -= 1;
+
+            if remaining % 1000 == 0 {
+                println!("remaining %: {:.0}", (remaining as f64 / gd.pos.len() as f64) * 100.0);
+            }
+        }
     }
+
     Ok(())
 }
 
