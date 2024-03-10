@@ -2,6 +2,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use io_uring::{opcode, types, IoUring};
 use rand::seq::SliceRandom;
+use rand::{Rng, RngCore};
 use std::{
     fs::{File, OpenOptions},
     io::{Seek, SeekFrom, Write},
@@ -37,7 +38,7 @@ fn main() -> Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
-        .custom_flags(libc::O_DIRECT | libc::O_DSYNC)
+        //.custom_flags(libc::O_DIRECT)
         .open(&filename)?;
 
     // Extend the file size to the requested.
@@ -66,26 +67,47 @@ fn main() -> Result<()> {
         junk: JunkBuf::new(cli.bs.to_bytes() as usize, &mut rng),
     });
 
-    const DEPTH: u32 = 1024;
-    let mut ring = IoUring::new(DEPTH)?;
+    const DEPTH: u32 = 256;
+    let mut ring: IoUring = IoUring::builder()
+        // .setup_coop_taskrun()
+        // .setup_single_issuer()
+        // .setup_defer_taskrun()
+        .build(DEPTH)?;
 
     let mut pos = gd.pos.iter().copied();
     let mut inflight = 0;
     let mut remaining = gd.pos.len();
     loop {
+        ring.completion().sync();
+
+        while let Some(cqe) = ring.completion().next() {
+            if cqe.result() < 0 {
+                bail!("write failed: {}", cqe.result());
+            }
+            inflight -= 1;
+            remaining -= 1;
+
+            if remaining % 1000 == 0 {
+                println!(
+                    "remaining %: {:.0}",
+                    (remaining as f64 / gd.pos.len() as f64) * 100.0
+                );
+            }
+        }
+
         ring.submission().sync();
         while !ring.submission().is_full() {
             let Some(offset) = pos.next() else {
                 break;
             };
+            // let mut buf = junk::allocate_aligned_vec(4096, 4096);
+            // rng.fill_bytes(&mut buf);
             let buf = gd.junk.rand(&mut rng);
-            let wrt_e = opcode::Write::new(
-                types::Fd(file.as_raw_fd()),
-                buf.as_ptr(),
-                buf.len() as _,
-            )
-            .build()
-            .user_data(offset as _);
+            let wrt_e =
+                opcode::Write::new(types::Fd(file.as_raw_fd()), buf.as_ptr(), buf.len() as _)
+                    .offset(offset)
+                    .build()
+                    .user_data(offset as _);
             unsafe {
                 // unwrap: we know the ring is not full
                 ring.submission().push(&wrt_e).unwrap();
@@ -100,19 +122,6 @@ fn main() -> Result<()> {
 
         ring.submission().sync();
         ring.submit_and_wait(1)?;
-
-        ring.completion().sync();
-        while let Some(cqe) = ring.completion().next() {
-            if cqe.result() < 0 {
-                bail!("write failed: {}", cqe.result());
-            }
-            inflight -= 1;
-            remaining -= 1;
-
-            if remaining % 1000 == 0 {
-                println!("remaining %: {:.0}", (remaining as f64 / gd.pos.len() as f64) * 100.0);
-            }
-        }
     }
 
     Ok(())

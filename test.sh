@@ -2,5 +2,5 @@
 
 cargo run --release -- \
     --size 10G \
-    --ratio 0.1 \
+    --ratio 0.5 \
     --filename /mnt/hole_bench

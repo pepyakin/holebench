@@ -24,11 +24,11 @@ impl JunkBuf {
     /// Returns a buffer ready to be written to disk.
     pub fn rand(&self, rng: &mut impl RngCore) -> &[u8] {
         let start = rng.gen_range(0..K_SZ) * self.bs;
-        &self.buf[start..]
+        &self.buf[start..(start + K_SZ)]
     }
 }
 
-fn allocate_aligned_vec<T>(len: usize, alignment: usize) -> Vec<T> {
+pub fn allocate_aligned_vec<T>(len: usize, alignment: usize) -> Vec<T> {
     let layout = Layout::array::<T>(len).unwrap();
     let layout = Layout::from_size_align(layout.size(), alignment).unwrap();
     unsafe {
