@@ -16,7 +16,7 @@ pub struct JunkBuf {
 impl JunkBuf {
     pub fn new(bs: usize, rng: &mut impl RngCore) -> Self {
         let sz = bs * K_SZ;
-        let mut buf = allocate_aligned_vec::<u8>(sz, ALIGNMENT);
+        let mut buf = allocate_aligned_vec(sz, ALIGNMENT);
         rng.fill_bytes(&mut buf);
         Self { buf, bs }
     }
@@ -28,11 +28,11 @@ impl JunkBuf {
     }
 }
 
-pub fn allocate_aligned_vec<T>(len: usize, alignment: usize) -> Vec<T> {
-    let layout = Layout::array::<T>(len).unwrap();
-    let layout = Layout::from_size_align(layout.size(), alignment).unwrap();
+pub fn allocate_aligned_vec(len: usize, alignment: usize) -> Vec<u8> {
+    let layout = Layout::from_size_align(len, alignment).unwrap();
     unsafe {
-        let ptr = NonNull::new(alloc(layout)).unwrap().cast::<T>();
+        let ptr = NonNull::new(alloc(layout)).unwrap().cast::<u8>();
+        std::ptr::write_bytes(ptr.as_ptr(), 0, len);
         Vec::from_raw_parts(ptr.as_ptr(), len, len)
     }
 }

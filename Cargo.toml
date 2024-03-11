@@ -3,11 +3,15 @@ name = "holebench"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+debug = 1
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 anyhow = "1.0.80"
 clap = { version = "4.5.1", features = ["derive"] }
+hdrhistogram = "7.5.4"
 io-uring = "0.6.3"
 libc = "0.2.153"
 rand = "0.8.5"
