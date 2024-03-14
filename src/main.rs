@@ -6,14 +6,12 @@ use libc::iovec;
 use rand::seq::SliceRandom;
 use rand::RngCore;
 use slab::Slab;
+use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
 use std::{
     fs::{File, OpenOptions},
-    os::{
-        fd::AsRawFd,
-        unix::fs::OpenOptionsExt,
-    },
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
     sync::Arc,
 };
@@ -52,7 +50,17 @@ fn main() -> Result<()> {
     pos.truncate(n_chunks as usize);
     let junk = JunkBuf::new(cli.bs.to_bytes() as usize, &mut rng);
 
-    create_and_layout_file(&filename, cli.size.to_bytes(), &mut rng, &pos, &junk)?;
+    create_and_layout_file(
+        &filename,
+        cli.size.to_bytes(),
+        cli.bs.to_bytes(),
+        cli.no_sparse,
+        cli.falloc_keep_size,
+        cli.falloc_zero_range,
+        &mut rng,
+        &pos,
+        &junk,
+    )?;
     measure(filename, cli, pos)?;
 
     Ok(())
@@ -62,13 +70,17 @@ fn main() -> Result<()> {
 fn create_and_layout_file(
     filename: &Path,
     size: u64,
+    bs: u64,
+    no_sparse: bool,
+    falloc_keep_size: bool,
+    falloc_zero_range: bool,
     rng: &mut impl RngCore,
     pos: &[u64],
     junk: &JunkBuf,
 ) -> anyhow::Result<()> {
     // We don't supply O_DIRECT here, since that seems to be faster for some reason.
     // TODO: this doesn't perform as best as possible with O_DIRECT. Why?
-    let file = OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
@@ -76,6 +88,36 @@ fn create_and_layout_file(
 
     // Extend the file size to the requested.
     file.set_len(size)?;
+
+    if falloc_keep_size || falloc_zero_range {
+        let mut flags = 0;
+        if falloc_keep_size {
+            flags |= libc::FALLOC_FL_KEEP_SIZE;
+        }
+        if falloc_zero_range {
+            flags |= libc::FALLOC_FL_ZERO_RANGE;
+        }
+        unsafe {
+            libc::fallocate(
+                file.as_raw_fd(),
+                flags,
+                0,
+                size as i64,
+            );
+        }
+    }
+
+    if no_sparse {
+        // TODO: optimize this
+        let zeros = vec![0; bs as usize];
+        let blocks = size / bs;
+        for i in 0..blocks {
+            if i % 1000 == 0 {
+                println!("zeroing: {}/{}", i, blocks);
+            }
+            file.write_all(&zeros)?;
+        }
+    }
 
     const DEPTH: u32 = 256;
     let mut ring: IoUring = IoUring::builder()
@@ -140,12 +182,12 @@ fn measure(filename: PathBuf, cli: Cli, pos: Vec<u64>) -> Result<()> {
         .read(true)
         .custom_flags(libc::O_DIRECT)
         .open(&filename)?;
-    const DEPTH: usize = 256;
+    const DEPTH: usize = 4;
     const PG_SZ: usize = 4096;
     let mut ring: IoUring = IoUring::builder()
-        // .setup_coop_taskrun()
-        // .setup_single_issuer()
-        // .setup_defer_taskrun()
+        .setup_coop_taskrun()
+        .setup_single_issuer()
+        .setup_defer_taskrun()
         .build(DEPTH as u32)?;
     let (submitter, mut sq, mut cq) = ring.split();
     let mut free_buf_pool = (0..DEPTH).collect::<Vec<_>>();
@@ -187,6 +229,7 @@ fn measure(filename: PathBuf, cli: Cli, pos: Vec<u64>) -> Result<()> {
                 let lat = latencies_h.value_at_quantile(q);
                 println!("{}th: {} us", q * 100.0, lat / 1000);
             }
+            println!("mean={} us", latencies_h.mean() / 1000.0);
         }
 
         if ramping_up {
@@ -215,8 +258,6 @@ fn measure(filename: PathBuf, cli: Cli, pos: Vec<u64>) -> Result<()> {
         sq.sync();
         let mut submitted = false;
         while !sq.is_full() && !free_buf_pool.is_empty() {
-            // println!("inflight: {}/{}", ioops.len(), sq.capacity());
-
             let offset = pos[index];
             index = (index + 1) % pos.len();
 

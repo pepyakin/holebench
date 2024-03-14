@@ -18,6 +18,8 @@ pub struct Cli {
     pub bs: BytesCnt,
 
     /// The size of the file to create.
+    /// 
+    /// The size must be equal or less than 2^63.
     #[clap(long)]
     pub size: BytesCnt,
 
@@ -36,6 +38,16 @@ pub struct Cli {
     /// The number of seconds to run the test.
     #[clap(long, default_value = "60")]
     pub run_time: u64,
+
+    /// By default the files are sparse.
+    #[clap(long, default_value = "false")]
+    pub no_sparse: bool,
+
+    #[clap(long, default_value = "false")]
+    pub falloc_keep_size: bool,
+
+    #[clap(long, default_value = "false")]
+    pub falloc_zero_range: bool,
 }
 
 impl Cli {
@@ -48,6 +60,9 @@ impl Cli {
         }
         if self.size.to_bytes() % self.bs.to_bytes() != 0 {
             bail!("the size should be a multiple of block size");
+        }
+        if i64::try_from(self.size.to_bytes()).is_err() {
+            bail!("the size should be equal or less than 2^63")
         }
         Ok(())
     }
