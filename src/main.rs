@@ -7,10 +7,9 @@ use rand::seq::SliceRandom;
 use rand::RngCore;
 use slab::Slab;
 use std::io::Write;
-use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
 };
@@ -23,56 +22,89 @@ use crate::junk::allocate_aligned_vec;
 mod cli;
 mod junk;
 
-fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let mut rng = rng();
+struct Opts {
+    /// The name to the file under test.
+    filename: PathBuf,
+    /// The total size of the file.
+    size: u64,
+    /// The size of the IO operations performed in bytes.
+    bs: u64,
+    /// The number of blocks, including populated blocks and holes.
+    ///
+    /// This is essentially `size` but in blocks of the `bs` size.
+    n_blocks: u64,
+    /// The number of populated blocks we should populated in the file.
+    ///
+    /// Calculated using the passed ratio parameter. Each block is of `bs` size.
+    n_populated_blocks: u64,
+    /// true if we should zero file (as in contrast to leave holes)
+    no_sparse: bool,
+    /// true if `falloc` with `FALLOC_FL_KEEP_SIZE` should be applied to the file.
+    falloc_keep_size: bool,
+    /// true if `falloc` with `FALLOC_FL_ZERO_RANGE` should be applied to the file.
+    falloc_zero_range: bool,
+    ramp_time: Duration,
+}
 
-    println!("{:#?}", cli);
-    cli.validate()?;
-
+fn parse_cli(cli: Cli) -> Result<Opts> {
     let filename = PathBuf::from(&cli.filename);
     if filename.is_dir() {
         bail!("{} is a directory", filename.display());
     }
+    let bs = cli.bs.to_bytes();
+    if bs == 0 {
+        bail!("bs can't be zero")
+    }
+    let size = cli.size.to_bytes();
+    if i64::try_from(cli.size.to_bytes()).is_err() {
+        bail!("the size should be equal or less than 2^63")
+    }
+    if size % bs != 0 {
+        bail!("the size should be a multiple of block size");
+    }
+    let n_blocks = size / bs;
+    if cli.ratio < 0.0 || cli.ratio > 1.0 {
+        bail!("--ratio must be within 0..1");
+    }
+    let n_populated_blocks = (n_blocks as f64 * cli.ratio) as u64;
+    let ramp_time = Duration::from_secs(cli.ramp_time);
+    Ok(Opts {
+        filename,
+        size,
+        bs,
+        n_blocks,
+        n_populated_blocks,
+        no_sparse: cli.no_sparse,
+        falloc_keep_size: cli.falloc_keep_size,
+        falloc_zero_range: cli.falloc_zero_range,
+        ramp_time,
+    })
+}
 
-    let total_chunks = cli.size.to_bytes() / cli.bs.to_bytes();
-    let n_chunks = (total_chunks as f64 * cli.ratio) as u64;
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let mut rng = rng();
 
-    println!("total chunks: {}", total_chunks);
-    println!("n chunks: {}", n_chunks);
+    let o = parse_cli(cli)?;
 
-    let mut pos: Vec<_> = (0..total_chunks)
-        .map(|chunk_no| chunk_no * cli.bs.to_bytes())
+    // Generate indicies of blocks that must be populated.
+    let mut popix: Vec<_> = (0..o.n_blocks)
+        .map(|chunk_no| chunk_no * o.bs)
         .into_iter()
         .collect();
-    pos.shuffle(&mut rng);
-    pos.truncate(n_chunks as usize);
-    let junk = JunkBuf::new(cli.bs.to_bytes() as usize, &mut rng);
+    popix.shuffle(&mut rng);
+    popix.truncate(o.n_populated_blocks as usize);
+    let junk = JunkBuf::new(o.bs as usize, &mut rng);
 
-    create_and_layout_file(
-        &filename,
-        cli.size.to_bytes(),
-        cli.bs.to_bytes(),
-        cli.no_sparse,
-        cli.falloc_keep_size,
-        cli.falloc_zero_range,
-        &mut rng,
-        &pos,
-        &junk,
-    )?;
-    measure(filename, cli, pos)?;
+    create_and_layout_file(&o, &mut rng, &popix, &junk)?;
+    measure(&o, popix)?;
 
     Ok(())
 }
 
 /// Perform a layout of the given file.
 fn create_and_layout_file(
-    filename: &Path,
-    size: u64,
-    bs: u64,
-    no_sparse: bool,
-    falloc_keep_size: bool,
-    falloc_zero_range: bool,
+    o: &Opts,
     rng: &mut impl RngCore,
     pos: &[u64],
     junk: &JunkBuf,
@@ -83,28 +115,28 @@ fn create_and_layout_file(
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&filename)?;
+        .open(&o.filename)?;
 
     // Extend the file size to the requested.
-    file.set_len(size)?;
+    file.set_len(o.size)?;
 
-    if falloc_keep_size || falloc_zero_range {
+    if o.falloc_keep_size || o.falloc_zero_range {
         let mut flags = 0;
-        if falloc_keep_size {
+        if o.falloc_keep_size {
             flags |= libc::FALLOC_FL_KEEP_SIZE;
         }
-        if falloc_zero_range {
+        if o.falloc_zero_range {
             flags |= libc::FALLOC_FL_ZERO_RANGE;
         }
         unsafe {
-            libc::fallocate(file.as_raw_fd(), flags, 0, size as i64);
+            libc::fallocate(file.as_raw_fd(), flags, 0, o.size as i64);
         }
     }
 
-    if no_sparse {
+    if o.no_sparse {
         // TODO: optimize this
-        let zeros = vec![0; bs as usize];
-        let blocks = size / bs;
+        let zeros = vec![0; o.bs as usize];
+        let blocks = o.size / o.bs;
         for i in 0..blocks {
             if i % 1000 == 0 {
                 println!("zeroing: {}/{}", i, blocks);
@@ -171,11 +203,11 @@ fn create_and_layout_file(
     Ok(())
 }
 
-fn measure(filename: PathBuf, cli: Cli, pos: Vec<u64>) -> Result<()> {
+fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECT)
-        .open(&filename)?;
+        .open(&o.filename)?;
     const DEPTH: usize = 4;
     const PG_SZ: usize = 4096;
     let mut ring: IoUring = IoUring::builder()
@@ -227,7 +259,7 @@ fn measure(filename: PathBuf, cli: Cli, pos: Vec<u64>) -> Result<()> {
         }
 
         if ramping_up {
-            if loop_start.elapsed().as_millis() >= cli.ramp_time as u128 * 1000 {
+            if loop_start.elapsed() >= o.ramp_time {
                 ramping_up = false;
             }
         }
