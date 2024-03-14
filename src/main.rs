@@ -13,7 +13,6 @@ use std::{
     fs::{File, OpenOptions},
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
-    sync::Arc,
 };
 
 use cli::Cli;
@@ -98,12 +97,7 @@ fn create_and_layout_file(
             flags |= libc::FALLOC_FL_ZERO_RANGE;
         }
         unsafe {
-            libc::fallocate(
-                file.as_raw_fd(),
-                flags,
-                0,
-                size as i64,
-            );
+            libc::fallocate(file.as_raw_fd(), flags, 0, size as i64);
         }
     }
 
@@ -291,22 +285,6 @@ fn measure(filename: PathBuf, cli: Cli, pos: Vec<u64>) -> Result<()> {
         }
         submitter.submit_and_wait(1)?;
     }
-}
-
-#[derive(Debug)]
-struct GlobalData {
-    filename: PathBuf,
-    file: Arc<File>,
-    pos: Vec<u64>,
-    bs: u64,
-    junk: JunkBuf,
-}
-
-#[derive(Debug, Clone)]
-struct ThreadData {
-    job_id: usize,
-    gd: Arc<GlobalData>,
-    pos: Vec<u64>,
 }
 
 fn rng() -> rand_pcg::Pcg64 {

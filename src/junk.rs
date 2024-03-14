@@ -1,7 +1,7 @@
-use std::alloc::{alloc, Layout};
-use std::ptr::NonNull;
-use std::fmt;
 use rand::{Rng, RngCore};
+use std::alloc::{alloc, Layout};
+use std::fmt;
+use std::ptr::NonNull;
 
 const K_SZ: usize = 4096;
 const ALIGNMENT: usize = 4096;

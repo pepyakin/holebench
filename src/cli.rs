@@ -1,8 +1,8 @@
 //! Definition of the command-line interface arguments.
 
 use anyhow::{bail, Result};
-use clap::Parser;
 pub use bytes_cnt::BytesCnt;
+use clap::Parser;
 
 mod bytes_cnt;
 
@@ -12,13 +12,13 @@ pub struct Cli {
     pub filename: String,
 
     /// The block size to use for the test.
-    /// 
+    ///
     /// can't be zero.
     #[clap(long, default_value = "4096")]
     pub bs: BytesCnt,
 
     /// The size of the file to create.
-    /// 
+    ///
     /// The size must be equal or less than 2^63.
     #[clap(long)]
     pub size: BytesCnt,
