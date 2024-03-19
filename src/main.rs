@@ -1,7 +1,6 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use hdrhistogram::Histogram;
-use io_uring::{opcode, types, IoUring};
 use libc::iovec;
 use rand::seq::SliceRandom;
 use rand::RngCore;
@@ -13,14 +12,17 @@ use std::{
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
 };
+use io_uring::{opcode, types, IoUring};
 
 use cli::Cli;
 use junk::JunkBuf;
 
+use crate::backend::Op;
 use crate::junk::allocate_aligned_vec;
 
 mod cli;
 mod junk;
+mod backend;
 
 struct Opts {
     /// The name to the file under test.
@@ -79,6 +81,10 @@ fn parse_cli(cli: Cli) -> Result<Opts> {
         falloc_zero_range: cli.falloc_zero_range,
         ramp_time,
     })
+}
+
+fn rng() -> rand_pcg::Pcg64 {
+    rand_pcg::Pcg64::new(0xcafef00dd15ea5e5, 0xa02bdbf7bb3c0a7ac28fa16a64abf96)
 }
 
 fn main() -> Result<()> {
@@ -145,59 +151,37 @@ fn create_and_layout_file(
         }
     }
 
-    const DEPTH: u32 = 256;
-    let mut ring: IoUring = IoUring::builder()
-        // .setup_coop_taskrun()
-        // .setup_single_issuer()
-        // .setup_defer_taskrun()
-        .build(DEPTH)?;
-
+    let backend = crate::backend::io_uring::init(file.as_raw_fd(), o);
     let mut pos_iter = pos.iter().copied();
-    let mut inflight = 0;
     let mut remaining = pos.len();
     loop {
-        ring.completion().sync();
-
-        while let Some(cqe) = ring.completion().next() {
-            if cqe.result() < 0 {
-                bail!("write failed: {}", cqe.result());
-            }
-            inflight -= 1;
-            remaining -= 1;
-
-            if remaining % 1000 == 0 {
-                println!(
-                    "remaining %: {:.0}",
-                    (remaining as f64 / pos.len() as f64) * 100.0
-                );
-            }
-        }
-
-        ring.submission().sync();
-        while !ring.submission().is_full() {
+        while !backend.is_full() {
             let Some(offset) = pos_iter.next() else {
                 break;
             };
             let buf = junk.rand(rng);
-            let wrt_e =
-                opcode::Write::new(types::Fd(file.as_raw_fd()), buf.as_ptr(), buf.len() as _)
-                    .offset(offset)
-                    .build()
-                    .user_data(offset as _);
-            unsafe {
-                // unwrap: we know the ring is not full
-                ring.submission().push(&wrt_e).unwrap();
+            backend.submit(Op::write(buf.to_vec(), offset));
+        }
+
+        match backend.wait() {
+            Some(op) => {
+                if op.result < 0 {
+                    bail!("write error: {}", op.result);
+                }
+                remaining -= 1;
+                if remaining % 1000 == 0 {
+                    println!(
+                        "remaining %: {:.0}",
+                        (remaining as f64 / pos.len() as f64) * 100.0
+                    );
+                }
             }
-            inflight += 1;
+            None => {
+                if remaining == 0 {
+                    break;
+                }
+            }
         }
-
-        // Nothing was submitted this round. If there are no inflight operations, we are done.
-        if inflight == 0 {
-            break;
-        }
-
-        ring.submission().sync();
-        ring.submit_and_wait(1)?;
     }
 
     Ok(())
@@ -317,8 +301,4 @@ fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
         }
         submitter.submit_and_wait(1)?;
     }
-}
-
-fn rng() -> rand_pcg::Pcg64 {
-    rand_pcg::Pcg64::new(0xcafef00dd15ea5e5, 0xa02bdbf7bb3c0a7ac28fa16a64abf96)
 }
