@@ -23,7 +23,7 @@ pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
         op_tx,
         retired_rx,
         inflight: Cell::new(0),
-        cap: 100,
+        cap: 4,
     };
     Box::new(me)
 }
@@ -97,7 +97,7 @@ fn worker_inner(
 
         sq.sync();
         let mut submitted = false;
-        while !sq.is_full() {
+        while inflight.len() < depth && !sq.is_full() {
             // The submission queue has free space. Check if there are any inbound ops pending.
             //
             // If there are none ops in flight, we use the blocking version since we don't need
