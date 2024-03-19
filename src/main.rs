@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use hdrhistogram::Histogram;
+use io_uring::{opcode, types, IoUring};
 use libc::iovec;
 use rand::seq::SliceRandom;
 use rand::RngCore;
@@ -12,7 +13,6 @@ use std::{
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
 };
-use io_uring::{opcode, types, IoUring};
 
 use cli::Cli;
 use junk::JunkBuf;
@@ -20,9 +20,9 @@ use junk::JunkBuf;
 use crate::backend::Op;
 use crate::junk::allocate_aligned_vec;
 
+mod backend;
 mod cli;
 mod junk;
-mod backend;
 
 struct Opts {
     /// The name to the file under test.
@@ -160,7 +160,7 @@ fn create_and_layout_file(
                 break;
             };
             let buf = junk.rand(rng);
-            backend.submit(Op::write(buf.to_vec(), offset));
+            backend.submit(Op::write(buf.as_ptr(), buf.len(), offset));
         }
 
         match backend.wait() {
@@ -192,40 +192,16 @@ fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
         .read(true)
         .custom_flags(libc::O_DIRECT)
         .open(&o.filename)?;
-    const DEPTH: usize = 4;
-    const PG_SZ: usize = 4096;
-    let mut ring: IoUring = IoUring::builder()
-        .setup_coop_taskrun()
-        .setup_single_issuer()
-        .setup_defer_taskrun()
-        .build(DEPTH as u32)?;
-    let (submitter, mut sq, mut cq) = ring.split();
-    let mut free_buf_pool = (0..DEPTH).collect::<Vec<_>>();
-    let mut buffers = (0..DEPTH)
-        .map(|_| allocate_aligned_vec(PG_SZ, 4096))
-        .collect::<Vec<_>>();
-    let iovecs = buffers
-        .iter_mut()
-        .map(|buf| iovec {
-            iov_base: buf.as_mut_ptr() as _,
-            iov_len: buf.len(),
-        })
-        .collect::<Vec<_>>();
-    // SAFETY: trust me bro.
-    unsafe {
-        submitter.register_buffers(&iovecs)?;
-    }
-    let mut ioops: Slab<Ioop> = Slab::with_capacity(DEPTH as usize);
-    struct Ioop {
-        buf_index: usize,
-        start: Instant,
-    }
+
+    let backend = crate::backend::io_uring::init(file.as_raw_fd(), o);
     let mut index = 0;
     let loop_start = Instant::now();
     let mut second_start = Instant::now();
     let mut iops = 0;
     let mut ramping_up = true;
     let mut latencies_h = Histogram::<u64>::new_with_bounds(1, 1000000000, 3).unwrap();
+
+    let mut buf_pool = BufPool::new();
     loop {
         if iops > 1000 && second_start.elapsed().as_millis() > 1000 {
             second_start = Instant::now();
@@ -234,12 +210,14 @@ fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
             iops = 0;
             println!("cur: {}", cur);
 
-            // Print out the latencies for various percentiles.
-            for q in [0.001, 0.01, 0.25, 0.50, 0.75, 0.95, 0.99, 0.999] {
-                let lat = latencies_h.value_at_quantile(q);
-                println!("{}th: {} us", q * 100.0, lat / 1000);
+            if !ramping_up {
+                // Print out the latencies for various percentiles.
+                for q in [0.001, 0.01, 0.25, 0.50, 0.75, 0.95, 0.99, 0.999] {
+                    let lat = latencies_h.value_at_quantile(q);
+                    println!("{}th: {} us", q * 100.0, lat / 1000);
+                }
+                println!("mean={} us", latencies_h.mean() / 1000.0);
             }
-            println!("mean={} us", latencies_h.mean() / 1000.0);
         }
 
         if ramping_up {
@@ -248,57 +226,72 @@ fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
             }
         }
 
-        cq.sync();
-        while let Some(cqe) = cq.next() {
-            if cqe.result() < 0 {
-                bail!("write failed: {}", cqe.result());
-            }
-            let Ioop { buf_index, start } = ioops.remove(cqe.user_data() as usize);
-            free_buf_pool.push(buf_index);
-
-            if !ramping_up {
-                // Do the bookkeeping, but only if we are not ramping up.
-                latencies_h
-                    .record(start.elapsed().as_nanos().try_into().unwrap())
-                    .unwrap();
-            }
-            iops += 1;
-        }
-
-        sq.sync();
-        let mut submitted = false;
-        while !sq.is_full() && !free_buf_pool.is_empty() {
+        while !backend.is_full() {
             let offset = pos[index];
             index = (index + 1) % pos.len();
 
-            // check out a free buffer.
-            let Some(buf_index) = free_buf_pool.pop() else {
-                panic!("free buffer pool is exhausted")
-            };
-            let buf = &mut buffers[buf_index];
-            let token = ioops.insert(Ioop {
-                buf_index,
-                start: Instant::now(),
-            });
-            let rd_e = opcode::ReadFixed::new(
-                types::Fd(file.as_raw_fd()),
-                buf.as_mut_ptr(),
-                buf.len() as _,
-                buf_index as u16,
-            )
-            .offset(offset)
-            .build()
-            .user_data(token as u64);
-            unsafe {
-                // unwrap: we know the ring is not full
-                sq.push(&rd_e).unwrap();
-                submitted = true;
-            }
+            let (buf_index, ptr, len) = buf_pool.checkout();
+            let mut op = Op::read(ptr, len, offset);
+            op.user_data = buf_index as u64;
+            backend.submit(op)
         }
 
-        if submitted {
-            sq.sync();
+        match backend.wait() {
+            Some(op) => {
+                if op.result < 0 {
+                    bail!("write failed: {}", op.result);
+                }
+
+                let buf_index = op.user_data as usize;
+                buf_pool.release(buf_index);
+
+                if !ramping_up {
+                    // Do the bookkeeping, but only if we are not ramping up.
+                    let dur = op.retired.unwrap() - op.submitted.unwrap();
+                    latencies_h
+                        .record(dur.as_nanos().try_into().unwrap())
+                        .unwrap();
+                }
+                iops += 1;
+            }
+            None => {
+                panic!()
+            }
+        };
+    }
+}
+
+struct BufPool {
+    pool: Slab<Box<[u8]>>,
+    free: Vec<usize>,
+}
+
+impl BufPool {
+    pub fn new() -> Self {
+        Self {
+            pool: Slab::new(),
+            free: Vec::new(),
         }
-        submitter.submit_and_wait(1)?;
+    }
+
+    pub fn checkout(&mut self) -> (usize, *mut u8, usize) {
+        let index = match self.free.pop() {
+            Some(index) => index,
+            _ => {
+                let iovec = allocate_aligned_vec(4096, 4096);
+                self.pool.insert(iovec.into_boxed_slice())
+            }
+        };
+        let (ptr, len) = self.get_ptr_and_len(index);
+        (index, ptr, len)
+    }
+
+    pub fn release(&mut self, index: usize) {
+        self.free.push(index);
+    }
+
+    fn get_ptr_and_len(&self, index: usize) -> (*mut u8, usize) {
+        let buf = &self.pool[index];
+        (buf.as_ptr() as *mut u8, buf.len())
     }
 }

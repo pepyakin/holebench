@@ -1,10 +1,10 @@
-use crate::Opts;
 use super::{Backend, Op, OpTy};
+use crate::Opts;
 use io_uring::{opcode, types, IoUring};
 use slab::Slab;
 use std::cell::Cell;
 use std::io;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 
 pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
@@ -23,7 +23,7 @@ pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
         op_tx,
         retired_rx,
         inflight: Cell::new(0),
-        cap: 4,
+        cap: 100,
     };
     Box::new(me)
 }
@@ -65,7 +65,9 @@ struct WorkerParams {
 }
 
 fn worker(params: WorkerParams) {
-    if let Err(err) = worker_inner(params) {}
+    if let Err(err) = worker_inner(params) {
+        eprintln!("err: {}", err);
+    }
 }
 
 fn worker_inner(
@@ -76,7 +78,6 @@ fn worker_inner(
         retired_tx,
     }: WorkerParams,
 ) -> io::Result<()> {
-    const PG_SZ: usize = 4096;
     let mut ring: IoUring = IoUring::builder()
         .setup_coop_taskrun()
         .setup_single_issuer()
@@ -103,12 +104,27 @@ fn worker_inner(
             // to `enter`/wait for the io-uring.
             //
             // In case the other side of the channel hung up,
-            let op = if inflight.is_empty() {
-                op_rx.recv().ok()
+            enum Recv {
+                Got(Op),
+                Hungup,
+            }
+            let should_block = inflight.is_empty();
+            let recv = if should_block {
+                match op_rx.recv() {
+                    Ok(op) => Recv::Got(op),
+                    Err(_) => Recv::Hungup,
+                }
             } else {
-                op_rx.try_recv().ok()
+                match op_rx.try_recv() {
+                    Ok(op) => Recv::Got(op),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => Recv::Hungup,
+                }
             };
-            let Some(mut op) = op else { return Ok(()) };
+            let mut op = match recv {
+                Recv::Got(op) => op,
+                Recv::Hungup => return Ok(()),
+            };
             op.note_submitted();
             let id = inflight.insert(op);
             let sqe = op_to_sqe(fd, &inflight[id]).user_data(id as u64);
@@ -129,10 +145,8 @@ fn worker_inner(
 fn op_to_sqe(fd: i32, op: &Op) -> io_uring::squeue::Entry {
     let fd = types::Fd(fd);
     match &op.ty {
-        OpTy::Read { buf, at } => opcode::Read::new(fd, buf.as_ptr() as *mut u8, buf.len() as u32)
-            .offset(*at)
-            .build(),
-        OpTy::Write { buf, at } => opcode::Write::new(fd, buf.as_ptr(), buf.len() as u32)
+        OpTy::Read { buf, len, at } => opcode::Read::new(fd, *buf, *len as u32).offset(*at).build(),
+        OpTy::Write { buf, len, at } => opcode::Write::new(fd, *buf, *len as u32)
             .offset(*at)
             .build(),
     }
