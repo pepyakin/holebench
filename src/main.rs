@@ -1,11 +1,10 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use hdrhistogram::Histogram;
-use io_uring::{opcode, types, IoUring};
-use libc::iovec;
 use rand::seq::SliceRandom;
 use rand::RngCore;
 use slab::Slab;
+use std::fs::File;
 use std::io::Write;
 use std::time::{Duration, Instant};
 use std::{
@@ -20,6 +19,7 @@ use junk::JunkBuf;
 use crate::backend::Op;
 use crate::junk::allocate_aligned_vec;
 
+mod ringbuf;
 mod backend;
 mod cli;
 mod junk;
@@ -27,7 +27,7 @@ mod junk;
 struct Opts {
     /// The name to the file under test.
     filename: PathBuf,
-    /// The total size of the file.
+    /// The total size of the file in bytes.
     size: u64,
     /// The size of the IO operations performed in bytes.
     bs: u64,
@@ -46,6 +46,7 @@ struct Opts {
     /// true if `falloc` with `FALLOC_FL_ZERO_RANGE` should be applied to the file.
     falloc_zero_range: bool,
     ramp_time: Duration,
+    backend: cli::Backend,
 }
 
 fn parse_cli(cli: Cli) -> Result<Opts> {
@@ -80,7 +81,15 @@ fn parse_cli(cli: Cli) -> Result<Opts> {
         falloc_keep_size: cli.falloc_keep_size,
         falloc_zero_range: cli.falloc_zero_range,
         ramp_time,
+        backend: cli.backend,
     })
+}
+
+fn backend(file: &File, o: &Opts) -> Box<dyn crate::backend::Backend> {
+    match o.backend {
+        cli::Backend::IoUring => crate::backend::io_uring::init(file.as_raw_fd(), o),
+        cli::Backend::Mmap => crate::backend::mmap::init(file.as_raw_fd(), o),
+    }
 }
 
 fn rng() -> rand_pcg::Pcg64 {
@@ -119,6 +128,7 @@ fn create_and_layout_file(
     // TODO: this doesn't perform as best as possible with O_DIRECT. Why?
     let mut file = OpenOptions::new()
         .write(true)
+        .read(true)
         .create(true)
         .truncate(true)
         .open(&o.filename)?;
@@ -151,7 +161,7 @@ fn create_and_layout_file(
         }
     }
 
-    let backend = crate::backend::io_uring::init(file.as_raw_fd(), o);
+    let backend = backend(&file, o);
     let mut pos_iter = pos.iter().copied();
     let mut remaining = pos.len();
     loop {
@@ -190,10 +200,11 @@ fn create_and_layout_file(
 fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
     let file = OpenOptions::new()
         .read(true)
+        .write(true)
         .custom_flags(libc::O_DIRECT)
         .open(&o.filename)?;
 
-    let backend = crate::backend::io_uring::init(file.as_raw_fd(), o);
+    let backend = backend(&file, o);
     let mut index = 0;
     let loop_start = Instant::now();
     let mut second_start = Instant::now();
@@ -214,9 +225,9 @@ fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
                 // Print out the latencies for various percentiles.
                 for q in [0.001, 0.01, 0.25, 0.50, 0.75, 0.95, 0.99, 0.999] {
                     let lat = latencies_h.value_at_quantile(q);
-                    println!("{}th: {} us", q * 100.0, lat / 1000);
+                    println!("{}th: {} ns", q * 100.0, lat);
                 }
-                println!("mean={} us", latencies_h.mean() / 1000.0);
+                println!("mean={} ns", latencies_h.mean());
             }
         }
 

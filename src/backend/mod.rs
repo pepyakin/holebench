@@ -1,6 +1,7 @@
-use std::{io, time::Instant};
+use std::time::Instant;
 
 pub mod io_uring;
+pub mod mmap;
 
 pub enum OpTy {
     Read { buf: *mut u8, len: usize, at: u64 },

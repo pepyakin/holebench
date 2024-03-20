@@ -1,9 +1,30 @@
 //! Definition of the command-line interface arguments.
 
+use std::str::FromStr;
+
 pub use bytes_cnt::BytesCnt;
 use clap::Parser;
 
 mod bytes_cnt;
+
+#[derive(Debug, Clone)]
+pub enum Backend {
+    IoUring,
+    Mmap,
+}
+
+impl FromStr for Backend {
+    type Err = String;
+    
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "iouring" => Ok(Backend::IoUring),
+            "mmap" => Ok(Backend::Mmap),
+            backend => Err(format!("Unknown backend: {backend}"))
+        }
+    }
+    
+}
 
 #[derive(Parser, Debug)]
 pub struct Cli {
@@ -47,4 +68,7 @@ pub struct Cli {
 
     #[clap(long, default_value = "false")]
     pub falloc_zero_range: bool,
+
+    #[clap(long)]
+    pub backend: Backend,
 }
