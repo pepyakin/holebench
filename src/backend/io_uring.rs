@@ -1,4 +1,4 @@
-use super::{Backend, Op, OpTy};
+use super::{Backend, Op, OpTy, Read, Write};
 use crate::Opts;
 use io_uring::{opcode, types, IoUring};
 use slab::Slab;
@@ -8,8 +8,8 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 
 pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
-    let (op_tx, op_rx) = mpsc::sync_channel(100);
-    let (retired_tx, retired_rx) = mpsc::sync_channel(100);
+    let (op_tx, op_rx) = mpsc::sync_channel(o.backlog_cnt);
+    let (retired_tx, retired_rx) = mpsc::sync_channel(o.backlog_cnt);
     let params = WorkerParams {
         depth: 4,
         fd,
@@ -23,7 +23,7 @@ pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
         op_tx,
         retired_rx,
         inflight: Cell::new(0),
-        cap: 4,
+        cap: o.backlog_cnt,
     };
     Box::new(me)
 }
@@ -81,7 +81,6 @@ fn worker_inner(
     let mut ring: IoUring = IoUring::builder()
         .setup_coop_taskrun()
         .setup_single_issuer()
-        .setup_defer_taskrun()
         .build(depth as u32)?;
     let (submitter, mut sq, mut cq) = ring.split();
     let mut inflight: Slab<Op> = Slab::with_capacity(depth);
@@ -145,9 +144,17 @@ fn worker_inner(
 fn op_to_sqe(fd: i32, op: &Op) -> io_uring::squeue::Entry {
     let fd = types::Fd(fd);
     match &op.ty {
-        OpTy::Read { buf, len, at } => opcode::Read::new(fd, *buf, *len as u32).offset(*at).build(),
-        OpTy::Write { buf, len, at } => opcode::Write::new(fd, *buf, *len as u32)
-            .offset(*at)
-            .build(),
+        OpTy::Read(Read { buf, len, at }) => {
+            opcode::Read::new(fd, *buf, *len as u32).offset(*at).build()
+        }
+        OpTy::Write(Write { buf, len, at }) => {
+            // unsafe {
+            //     let slice = std::slice::from_raw_parts(*buf, *len as usize);
+            //     println!("write: {:?}", slice);
+            // }
+            opcode::Write::new(fd, *buf, *len as u32)
+                    .offset(*at)
+                    .build()
+        },
     }
 }

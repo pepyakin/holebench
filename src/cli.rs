@@ -18,7 +18,7 @@ impl FromStr for Backend {
     
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "iouring" => Ok(Backend::IoUring),
+            "iouring" | "io_uring" | "io-uring" => Ok(Backend::IoUring),
             "mmap" => Ok(Backend::Mmap),
             backend => Err(format!("Unknown backend: {backend}"))
         }
@@ -68,6 +68,13 @@ pub struct Cli {
 
     #[clap(long, default_value = "false")]
     pub falloc_zero_range: bool,
+
+    #[clap(long, default_value = "false")]
+    pub skip_layout: bool,
+
+    /// Number of operations to keep in the backlog.
+    #[clap(long, default_value = "false")]
+    pub backlog: usize,
 
     #[clap(long)]
     pub backend: Backend,

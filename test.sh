@@ -1,7 +1,7 @@
 #!/bin/sh
 
 cargo run --release -- \
-    --size 100G \
-    --ratio 0.5 \
+    --size 48G \
+    --ratio 1 \
     --filename /mnt/hole_bench_1 \
-    --backend mmap
+    --backend iouring --skip-layout --backlog 100

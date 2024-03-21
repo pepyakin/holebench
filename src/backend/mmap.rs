@@ -1,9 +1,11 @@
-use std::{cell::RefCell, sync::{Arc, Weak}};
-
+use super::{Backend, Op, OpTy, Read, Write};
 use crate::Opts;
-use super::{Backend, Op, OpTy};
-use std::{ptr, thread};
 use crossbeam::channel;
+use std::{
+    cell::RefCell,
+    sync::{Arc, Weak},
+};
+use std::{ptr, thread};
 
 struct Mmap {
     base: *mut u8,
@@ -30,33 +32,42 @@ impl Mmap {
             len,
         }
     }
+
+    fn madvise_hint(&self) {
+        unsafe {
+            if libc::posix_madvise(
+                self.base as *mut libc::c_void,
+                self.len,
+                libc::POSIX_MADV_RANDOM | libc::POSIX_FADV_DONTNEED,
+            ) == -1
+            {
+                panic!();
+            }
+        }
+    }
 }
 
 impl Drop for Mmap {
     fn drop(&mut self) {
         unsafe {
-            let _ = libc::munmap(
-                self.base as *mut libc::c_void,
-                self.len,
-            );
+            let _ = libc::munmap(self.base as *mut libc::c_void, self.len);
         }
     }
 }
 
-unsafe impl Send for Mmap {   
-}
-unsafe impl Sync for Mmap {   
-}
+unsafe impl Send for Mmap {}
+unsafe impl Sync for Mmap {}
 
 pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
-    const NUMJOBS: usize = 2;
+    const NUMJOBS: usize = 4;
 
     let mmap = Arc::new(Mmap::mmap_fd(fd, o.size as usize));
+    mmap.madvise_hint();
 
-    let (sq_tx, sq_rx) = channel::bounded(100);
-    let (cq_tx, cq_rx) = channel::bounded(100);
-    
-    for i in 0..NUMJOBS {
+    let (sq_tx, sq_rx) = channel::bounded(o.backlog_cnt);
+    let (cq_tx, cq_rx) = channel::bounded(o.backlog_cnt);
+
+    for _i in 0..NUMJOBS {
         let sq_rx = sq_rx.clone();
         let cq_tx = cq_tx.clone();
         let mmap = Arc::downgrade(&mmap);
@@ -66,17 +77,17 @@ pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
     }
 
     let me = MmapBackend {
-        mmap,
+        _mmap: mmap,
         sq_tx,
         cq_rx,
         inflight: RefCell::new(0),
-        cap: 4,
+        cap: o.backlog_cnt,
     };
     Box::new(me)
 }
 
 struct MmapBackend {
-    mmap: Arc<Mmap>,
+    _mmap: Arc<Mmap>,
     sq_tx: channel::Sender<Op>,
     cq_rx: channel::Receiver<Op>,
     inflight: RefCell<usize>,
@@ -104,7 +115,7 @@ impl Backend for MmapBackend {
     }
 }
 
-fn worker(mmap: Weak<Mmap>, mut sq_rx: channel::Receiver<Op>, cq_tx: channel::Sender<Op>) {
+fn worker(mmap: Weak<Mmap>, sq_rx: channel::Receiver<Op>, cq_tx: channel::Sender<Op>) {
     loop {
         let mut op = match sq_rx.recv() {
             Ok(op) => op,
@@ -124,26 +135,36 @@ fn worker(mmap: Weak<Mmap>, mut sq_rx: channel::Receiver<Op>, cq_tx: channel::Se
 }
 
 fn handle_op(base: *mut u8, op: &mut Op) {
+    // since we aim for O_DIRECT, we should do msync.
+    // let (ptr, len) = op.ty.buf_ptr_and_len();
+    // unsafe {
+    //     if libc::msync(ptr as *mut libc::c_void, len, libc::MS_SYNC) < 0 {
+    //         panic!();
+    //     }
+    //     if libc::posix_madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTNEED) < 0 {
+    //         panic!();
+    //     }
+    // }
+
     match op.ty {
-        OpTy::Read { buf, len, at } => {
-            unsafe {
-                let src = base.offset(at as isize);
-                std::ptr::copy_nonoverlapping(
-                    src,
-                    buf,
-                    len,
-                )
-            }
+        OpTy::Read(Read { buf, len, at }) => unsafe {
+            let src = base.offset(at as isize);
+            std::ptr::copy_nonoverlapping(src, buf, len)
         },
-        OpTy::Write { buf, len, at } => {
-            unsafe {
-                let dst = base.offset(at as isize);
-                std::ptr::copy_nonoverlapping(
-                    buf,
-                    dst,
-                    len,
-                )
-            }
+        OpTy::Write(Write { buf, len, at }) => unsafe {
+            let dst = base.offset(at as isize);
+            std::ptr::copy_nonoverlapping(buf, dst, len)
         },
     }
+
+    // // since we aim for O_DIRECT, we should do msync.
+    // let (ptr, len) = op.ty.buf_ptr_and_len();
+    // unsafe {
+    //     if libc::msync(ptr as *mut libc::c_void, len, libc::MS_SYNC) < 0 {
+    //         panic!();
+    //     }
+    //     if libc::posix_madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTNEED) < 0 {
+    //         panic!();
+    //     }
+    // }
 }

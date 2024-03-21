@@ -3,9 +3,44 @@ use std::time::Instant;
 pub mod io_uring;
 pub mod mmap;
 
+pub struct Read {
+    pub buf: *mut u8,
+    pub len: usize,
+    pub at: u64,
+}
+
+pub struct Write {
+    pub buf: *const u8,
+    pub len: usize,
+    pub at: u64,
+}
+
 pub enum OpTy {
-    Read { buf: *mut u8, len: usize, at: u64 },
-    Write { buf: *const u8, len: usize, at: u64 },
+    Read(Read),
+    Write(Write),
+}
+
+impl OpTy {
+    pub fn assert_read(&self) -> &Read {
+        match self {
+            OpTy::Read(r) => r,
+            _ => panic!("expected read"),
+        }
+    }
+
+    pub fn assert_write(&self) -> &Write {
+        match self {
+            OpTy::Write(w) => w,
+            _ => panic!("expected write"),
+        }
+    }
+
+    pub fn buf_ptr_and_len(&self) -> (*const u8, usize) {
+        match self {
+            OpTy::Read(r) => (r.buf as *const u8, r.len),
+            OpTy::Write(w) => (w.buf, w.len),
+        }
+    }
 }
 
 unsafe impl Send for OpTy {}
@@ -22,7 +57,7 @@ pub struct Op {
 impl Op {
     pub fn read(buf: *mut u8, len: usize, at: u64) -> Self {
         Self {
-            ty: OpTy::Read { buf, len, at },
+            ty: OpTy::Read(Read { buf, len, at }),
             created: Some(Instant::now()),
             submitted: None,
             retired: None,
@@ -33,7 +68,7 @@ impl Op {
 
     pub fn write(buf: *const u8, len: usize, at: u64) -> Self {
         Self {
-            ty: OpTy::Write { buf, len, at },
+            ty: OpTy::Write(Write { buf, len, at }),
             created: Some(Instant::now()),
             submitted: None,
             retired: None,

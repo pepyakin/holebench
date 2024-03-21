@@ -19,7 +19,6 @@ use junk::JunkBuf;
 use crate::backend::Op;
 use crate::junk::allocate_aligned_vec;
 
-mod ringbuf;
 mod backend;
 mod cli;
 mod junk;
@@ -45,6 +44,10 @@ struct Opts {
     falloc_keep_size: bool,
     /// true if `falloc` with `FALLOC_FL_ZERO_RANGE` should be applied to the file.
     falloc_zero_range: bool,
+    /// Skip layout phase. Assume file exists.
+    skip_layout: bool,
+    /// The number of items to keep in the backlog.
+    backlog_cnt: usize,
     ramp_time: Duration,
     backend: cli::Backend,
 }
@@ -71,6 +74,13 @@ fn parse_cli(cli: Cli) -> Result<Opts> {
     }
     let n_populated_blocks = (n_blocks as f64 * cli.ratio) as u64;
     let ramp_time = Duration::from_secs(cli.ramp_time);
+
+    if cli.skip_layout {
+        if !filename.exists() {
+            bail!("--skip-layout passed and file does not exist!");
+        }
+    }
+
     Ok(Opts {
         filename,
         size,
@@ -80,6 +90,8 @@ fn parse_cli(cli: Cli) -> Result<Opts> {
         no_sparse: cli.no_sparse,
         falloc_keep_size: cli.falloc_keep_size,
         falloc_zero_range: cli.falloc_zero_range,
+        skip_layout: cli.skip_layout,
+        backlog_cnt: cli.backlog,
         ramp_time,
         backend: cli.backend,
     })
@@ -111,7 +123,9 @@ fn main() -> Result<()> {
     popix.truncate(o.n_populated_blocks as usize);
     let junk = JunkBuf::new(o.bs as usize, &mut rng);
 
-    create_and_layout_file(&o, &mut rng, &popix, &junk)?;
+    if !o.skip_layout {
+        create_and_layout_file(&o, &mut rng, &popix, &junk)?;
+    }
     measure(&o, popix)?;
 
     Ok(())
@@ -194,6 +208,8 @@ fn create_and_layout_file(
         }
     }
 
+    file.flush()?;
+
     Ok(())
 }
 
@@ -259,9 +275,8 @@ fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
                 if !ramping_up {
                     // Do the bookkeeping, but only if we are not ramping up.
                     let dur = op.retired.unwrap() - op.submitted.unwrap();
-                    latencies_h
-                        .record(dur.as_nanos().try_into().unwrap())
-                        .unwrap();
+                    let dur_nanos = dur.as_nanos().try_into().unwrap();
+                    latencies_h.record(dur_nanos).unwrap();
                 }
                 iops += 1;
             }
