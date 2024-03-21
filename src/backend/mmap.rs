@@ -58,7 +58,7 @@ impl Drop for Mmap {
 unsafe impl Send for Mmap {}
 unsafe impl Sync for Mmap {}
 
-pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
+pub fn init(fd: i32, o: &'static Opts) -> Box<dyn Backend> {
     const NUMJOBS: usize = 4;
 
     let mmap = Arc::new(Mmap::mmap_fd(fd, o.size as usize));
@@ -72,7 +72,7 @@ pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
         let cq_tx = cq_tx.clone();
         let mmap = Arc::downgrade(&mmap);
         let _ = thread::spawn(move || {
-            worker(mmap, sq_rx, cq_tx);
+            worker(o, mmap, sq_rx, cq_tx);
         });
     }
 
@@ -115,7 +115,12 @@ impl Backend for MmapBackend {
     }
 }
 
-fn worker(mmap: Weak<Mmap>, sq_rx: channel::Receiver<Op>, cq_tx: channel::Sender<Op>) {
+fn worker(
+    o: &'static Opts,
+    mmap: Weak<Mmap>,
+    sq_rx: channel::Receiver<Op>,
+    cq_tx: channel::Sender<Op>,
+) {
     loop {
         let mut op = match sq_rx.recv() {
             Ok(op) => op,
@@ -124,7 +129,7 @@ fn worker(mmap: Weak<Mmap>, sq_rx: channel::Receiver<Op>, cq_tx: channel::Sender
         {
             let Some(mmap) = mmap.upgrade() else { break };
             op.note_submitted();
-            handle_op(mmap.base, &mut op);
+            handle_op(o, mmap.base, &mut op);
             op.note_retired();
         }
         match cq_tx.send(op) {
@@ -134,18 +139,7 @@ fn worker(mmap: Weak<Mmap>, sq_rx: channel::Receiver<Op>, cq_tx: channel::Sender
     }
 }
 
-fn handle_op(base: *mut u8, op: &mut Op) {
-    // since we aim for O_DIRECT, we should do msync.
-    // let (ptr, len) = op.ty.buf_ptr_and_len();
-    // unsafe {
-    //     if libc::msync(ptr as *mut libc::c_void, len, libc::MS_SYNC) < 0 {
-    //         panic!();
-    //     }
-    //     if libc::posix_madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTNEED) < 0 {
-    //         panic!();
-    //     }
-    // }
-
+fn handle_op(o: &'static Opts, base: *mut u8, op: &mut Op) {
     match op.ty {
         OpTy::Read(Read { buf, len, at }) => unsafe {
             let src = base.offset(at as isize);
@@ -157,14 +151,16 @@ fn handle_op(base: *mut u8, op: &mut Op) {
         },
     }
 
-    // // since we aim for O_DIRECT, we should do msync.
-    // let (ptr, len) = op.ty.buf_ptr_and_len();
-    // unsafe {
-    //     if libc::msync(ptr as *mut libc::c_void, len, libc::MS_SYNC) < 0 {
-    //         panic!();
-    //     }
-    //     if libc::posix_madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTNEED) < 0 {
-    //         panic!();
-    //     }
-    // }
+    if o.direct {
+        // since we aim for O_DIRECT, we should do msync.
+        let (ptr, len) = op.ty.buf_ptr_and_len();
+        unsafe {
+            if libc::msync(ptr as *mut libc::c_void, len, libc::MS_SYNC) < 0 {
+                panic!();
+            }
+            if libc::posix_madvise(ptr as *mut libc::c_void, len, libc::MADV_DONTNEED) < 0 {
+                panic!();
+            }
+        }
+    }
 }

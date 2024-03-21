@@ -50,9 +50,10 @@ struct Opts {
     backlog_cnt: usize,
     ramp_time: Duration,
     backend: cli::Backend,
+    direct: bool,
 }
 
-fn parse_cli(cli: Cli) -> Result<Opts> {
+fn parse_cli(cli: Cli) -> Result<&'static Opts> {
     let filename = PathBuf::from(&cli.filename);
     if filename.is_dir() {
         bail!("{} is a directory", filename.display());
@@ -81,7 +82,11 @@ fn parse_cli(cli: Cli) -> Result<Opts> {
         }
     }
 
-    Ok(Opts {
+    if cli.direct && matches!(cli.backend, cli::Backend::Mmap) {
+        eprintln!("warning: direct I/O is not supported with mmap backend");
+    }
+
+    let o = Box::new(Opts {
         filename,
         size,
         bs,
@@ -94,10 +99,12 @@ fn parse_cli(cli: Cli) -> Result<Opts> {
         backlog_cnt: cli.backlog,
         ramp_time,
         backend: cli.backend,
-    })
+        direct: cli.direct,
+    });
+    Ok(Box::leak(o))
 }
 
-fn backend(file: &File, o: &Opts) -> Box<dyn crate::backend::Backend> {
+fn backend(file: &File, o: &'static Opts) -> Box<dyn crate::backend::Backend> {
     match o.backend {
         cli::Backend::IoUring => crate::backend::io_uring::init(file.as_raw_fd(), o),
         cli::Backend::Mmap => crate::backend::mmap::init(file.as_raw_fd(), o),
@@ -133,7 +140,7 @@ fn main() -> Result<()> {
 
 /// Perform a layout of the given file.
 fn create_and_layout_file(
-    o: &Opts,
+    o: &'static Opts,
     rng: &mut impl RngCore,
     pos: &[u64],
     junk: &JunkBuf,
@@ -213,12 +220,17 @@ fn create_and_layout_file(
     Ok(())
 }
 
-fn measure(o: &Opts, pos: Vec<u64>) -> Result<()> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_DIRECT)
-        .open(&o.filename)?;
+fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
+    let file = {
+        let mut oo = OpenOptions::new();
+        if o.direct {
+            oo.custom_flags(libc::O_DIRECT);
+        }
+        oo.read(true);
+        oo.write(true);
+        oo
+    }
+    .open(&o.filename)?;
 
     let backend = backend(&file, o);
     let mut index = 0;

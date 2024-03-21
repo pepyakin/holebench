@@ -15,7 +15,7 @@ pub enum Backend {
 
 impl FromStr for Backend {
     type Err = String;
-    
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "iouring" | "io_uring" | "io-uring" => Ok(Backend::IoUring),
@@ -23,7 +23,7 @@ impl FromStr for Backend {
             backend => Err(format!("Unknown backend: {backend}"))
         }
     }
-    
+
 }
 
 #[derive(Parser, Debug)]
@@ -78,4 +78,11 @@ pub struct Cli {
 
     #[clap(long)]
     pub backend: Backend,
+
+    /// Whether the direct I/O should be used.
+    ///
+    /// On Linux, it is equivalent to the O_DIRECT flag. However, note that the O_DIRECT flag is
+    /// not supported in combination with the mmap backend.
+    #[clap(long, default_value = "false")]
+    pub direct: bool,
 }
