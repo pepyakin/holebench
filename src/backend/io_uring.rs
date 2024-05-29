@@ -8,19 +8,27 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::thread;
 
 pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
-    let (op_tx, op_rx) = mpsc::sync_channel(o.backlog_cnt);
     let (retired_tx, retired_rx) = mpsc::sync_channel(o.backlog_cnt);
-    let params = WorkerParams {
-        depth: 4,
-        fd,
-        op_rx,
-        retired_tx,
-    };
-    let _ = thread::spawn(move || {
-        worker(params);
-    });
+    
+    let mut op_txs = Vec::with_capacity(o.num_jobs);
+    for _ in 0..o.num_jobs {
+        let (op_tx, op_rx) = mpsc::sync_channel(o.backlog_cnt);
+        op_txs.push(op_tx);
+        let params = WorkerParams {
+            depth: 64,
+            fd,
+            op_rx,
+            retired_tx: retired_tx.clone(),
+        };
+        let _ = thread::spawn(move || {
+            worker(params);
+        });
+    }
+
+
     let me = IoUringBackend {
-        op_tx,
+        round_robin: Cell::new(0),
+        op_txs,
         retired_rx,
         inflight: Cell::new(0),
         cap: o.backlog_cnt,
@@ -29,7 +37,8 @@ pub fn init(fd: i32, o: &Opts) -> Box<dyn Backend> {
 }
 
 struct IoUringBackend {
-    op_tx: mpsc::SyncSender<Op>,
+    round_robin: Cell<usize>,
+    op_txs: Vec<mpsc::SyncSender<Op>>,
     retired_rx: mpsc::Receiver<Op>,
     inflight: Cell<usize>,
     cap: usize,
@@ -40,8 +49,12 @@ impl Backend for IoUringBackend {
         self.inflight.get() == self.cap
     }
     fn submit(&self, op: Op) {
-        // TODO:
-        self.op_tx.send(op).unwrap();
+        let idx = {
+            let idx = self.round_robin.get();
+            self.round_robin.set((idx + 1) % self.op_txs.len());
+            idx
+        };
+        self.op_txs[idx].send(op).unwrap();
         let new_inflight = self.inflight.get() + 1;
         self.inflight.set(new_inflight);
     }
@@ -79,8 +92,6 @@ fn worker_inner(
     }: WorkerParams,
 ) -> io::Result<()> {
     let mut ring: IoUring = IoUring::builder()
-        .setup_coop_taskrun()
-        .setup_single_issuer()
         .build(depth as u32)?;
     let (submitter, mut sq, mut cq) = ring.split();
     let mut inflight: Slab<Op> = Slab::with_capacity(depth);
@@ -153,8 +164,8 @@ fn op_to_sqe(fd: i32, op: &Op) -> io_uring::squeue::Entry {
             //     println!("write: {:?}", slice);
             // }
             opcode::Write::new(fd, *buf, *len as u32)
-                    .offset(*at)
-                    .build()
-        },
+                .offset(*at)
+                .build()
+        }
     }
 }

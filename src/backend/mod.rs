@@ -2,6 +2,7 @@ use std::time::Instant;
 
 pub mod io_uring;
 pub mod mmap;
+pub mod sync;
 
 pub struct Read {
     pub buf: *mut u8,
@@ -21,20 +22,6 @@ pub enum OpTy {
 }
 
 impl OpTy {
-    pub fn assert_read(&self) -> &Read {
-        match self {
-            OpTy::Read(r) => r,
-            _ => panic!("expected read"),
-        }
-    }
-
-    pub fn assert_write(&self) -> &Write {
-        match self {
-            OpTy::Write(w) => w,
-            _ => panic!("expected write"),
-        }
-    }
-
     pub fn buf_ptr_and_len(&self) -> (*const u8, usize) {
         match self {
             OpTy::Read(r) => (r.buf as *const u8, r.len),

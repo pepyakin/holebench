@@ -59,15 +59,13 @@ unsafe impl Send for Mmap {}
 unsafe impl Sync for Mmap {}
 
 pub fn init(fd: i32, o: &'static Opts) -> Box<dyn Backend> {
-    const NUMJOBS: usize = 4;
-
     let mmap = Arc::new(Mmap::mmap_fd(fd, o.size as usize));
     mmap.madvise_hint();
 
     let (sq_tx, sq_rx) = channel::bounded(o.backlog_cnt);
     let (cq_tx, cq_rx) = channel::bounded(o.backlog_cnt);
 
-    for _i in 0..NUMJOBS {
+    for _i in 0..o.num_jobs {
         let sq_rx = sq_rx.clone();
         let cq_tx = cq_tx.clone();
         let mmap = Arc::downgrade(&mmap);

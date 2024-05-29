@@ -1,6 +1,7 @@
 use anyhow::{bail, Result};
 use clap::Parser;
 use hdrhistogram::Histogram;
+use indicatif::{ProgressBar, ProgressStyle};
 use rand::seq::SliceRandom;
 use rand::RngCore;
 use slab::Slab;
@@ -12,13 +13,11 @@ use std::{
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
 };
-use indicatif::{ProgressBar, ProgressStyle};
 
 use cli::Cli;
 use junk::JunkBuf;
 
 use crate::backend::Op;
-use crate::junk::allocate_aligned_vec;
 
 mod backend;
 mod cli;
@@ -52,6 +51,7 @@ struct Opts {
     ramp_time: Duration,
     backend: cli::Backend,
     direct: bool,
+    num_jobs: usize,
 }
 
 fn parse_cli(cli: Cli) -> Result<&'static Opts> {
@@ -62,6 +62,12 @@ fn parse_cli(cli: Cli) -> Result<&'static Opts> {
     let bs = cli.bs.to_bytes();
     if bs == 0 {
         bail!("bs can't be zero")
+    }
+    if !bs.is_power_of_two() {
+        bail!("bs should be a power of two");
+    }
+    if bs < 512 {
+        bail!("bs can't be less than 512");
     }
     let size = cli.size.to_bytes();
     if i64::try_from(cli.size.to_bytes()).is_err() {
@@ -101,6 +107,7 @@ fn parse_cli(cli: Cli) -> Result<&'static Opts> {
         ramp_time,
         backend: cli.backend,
         direct: cli.direct,
+        num_jobs: cli.num_jobs,
     });
     Ok(Box::leak(o))
 }
@@ -109,6 +116,7 @@ fn backend(file: &File, o: &'static Opts) -> Box<dyn crate::backend::Backend> {
     match o.backend {
         cli::Backend::IoUring => crate::backend::io_uring::init(file.as_raw_fd(), o),
         cli::Backend::Mmap => crate::backend::mmap::init(file.as_raw_fd(), o),
+        cli::Backend::Sync => crate::backend::sync::init(file.as_raw_fd(), o),
     }
 }
 
@@ -246,7 +254,7 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
     let mut ramping_up = true;
     let mut latencies_h = Histogram::<u64>::new_with_bounds(1, 1000000000, 3).unwrap();
 
-    let mut buf_pool = BufPool::new();
+    let mut buf_pool = BufPool::new(o.bs);
     loop {
         if iops > 1000 && second_start.elapsed().as_millis() > 1000 {
             second_start = Instant::now();
@@ -306,15 +314,17 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
 }
 
 struct BufPool {
-    pool: Slab<Box<[u8]>>,
+    pool: Slab<*mut u8>,
     free: Vec<usize>,
+    bs: usize,
 }
 
 impl BufPool {
-    pub fn new() -> Self {
+    pub fn new(bs: u64) -> Self {
         Self {
             pool: Slab::new(),
             free: Vec::new(),
+            bs: bs.try_into().unwrap(),
         }
     }
 
@@ -322,8 +332,11 @@ impl BufPool {
         let index = match self.free.pop() {
             Some(index) => index,
             _ => {
-                let iovec = allocate_aligned_vec(4096, 4096);
-                self.pool.insert(iovec.into_boxed_slice())
+                unsafe {
+                    let layout = std::alloc::Layout::from_size_align(self.bs, self.bs).unwrap();
+                    let ptr = std::alloc::alloc_zeroed(layout);
+                    self.pool.insert(ptr)
+                }
             }
         };
         let (ptr, len) = self.get_ptr_and_len(index);
@@ -335,7 +348,7 @@ impl BufPool {
     }
 
     fn get_ptr_and_len(&self, index: usize) -> (*mut u8, usize) {
-        let buf = &self.pool[index];
-        (buf.as_ptr() as *mut u8, buf.len())
+        let buf = self.pool[index];
+        (buf, self.bs)
     }
 }

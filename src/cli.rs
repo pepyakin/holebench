@@ -11,6 +11,7 @@ mod bytes_cnt;
 pub enum Backend {
     IoUring,
     Mmap,
+    Sync,
 }
 
 impl FromStr for Backend {
@@ -20,10 +21,10 @@ impl FromStr for Backend {
         match s {
             "iouring" | "io_uring" | "io-uring" => Ok(Backend::IoUring),
             "mmap" => Ok(Backend::Mmap),
-            backend => Err(format!("Unknown backend: {backend}"))
+            "sync" => Ok(Backend::Sync),
+            backend => Err(format!("Unknown backend: {backend}")),
         }
     }
-
 }
 
 #[derive(Parser, Debug)]
@@ -73,7 +74,7 @@ pub struct Cli {
     pub skip_layout: bool,
 
     /// Number of operations to keep in the backlog.
-    #[clap(long, default_value = "false")]
+    #[clap(long, default_value = "1000")]
     pub backlog: usize,
 
     #[clap(long)]
@@ -85,4 +86,7 @@ pub struct Cli {
     /// not supported in combination with the mmap backend.
     #[clap(long, default_value = "false")]
     pub direct: bool,
+
+    #[clap(long, default_value = "1")]
+    pub num_jobs: usize,
 }
