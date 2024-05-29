@@ -185,6 +185,14 @@ fn create_and_layout_file(
     let backend = backend(&file, o);
     let mut pos_iter = pos.iter().copied();
     let mut remaining = pos.len();
+
+    let total_sz = o.bs * remaining as u64;
+    let pb = ProgressBar::new(total_sz);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40}] {bytes}/{total_bytes} ({eta})")
+            .unwrap(),
+    );
     loop {
         while !backend.is_full() {
             let Some(offset) = pos_iter.next() else {
@@ -200,12 +208,7 @@ fn create_and_layout_file(
                     bail!("write error: {}", op.result);
                 }
                 remaining -= 1;
-                if remaining % 1000 == 0 {
-                    println!(
-                        "remaining %: {:.0}",
-                        (remaining as f64 / pos.len() as f64) * 100.0
-                    );
-                }
+                pb.inc(o.bs);
             }
             None => {
                 if remaining == 0 {
@@ -215,7 +218,9 @@ fn create_and_layout_file(
         }
     }
 
+    pb.finish_with_message("flushing...");
     file.flush()?;
+    println!("flushed");
 
     Ok(())
 }
