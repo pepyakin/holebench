@@ -48,6 +48,10 @@ impl std::str::FromStr for BytesCnt {
                     suffix = Some('g');
                     break;
                 }
+                't' | 'T' => {
+                    suffix = Some('t');
+                    break;
+                }
                 '_' => {
                     // separator, discard it.
                     continue;
@@ -71,6 +75,7 @@ impl std::str::FromStr for BytesCnt {
 const KB_K: u64 = 1024;
 const MB_K: u64 = 1024 * KB_K;
 const GB_K: u64 = 1024 * MB_K;
+const TB_K: u64 = 1024 * GB_K;
 
 impl BytesCnt {
     pub fn new(num: u64, suffix: Option<char>) -> Result<Self> {
@@ -92,6 +97,7 @@ impl BytesCnt {
             Some('k') => self.num.checked_mul(KB_K)?,
             Some('m') => self.num.checked_mul(MB_K)?,
             Some('g') => self.num.checked_mul(GB_K)?,
+            Some('t') => self.num.checked_mul(TB_K)?,
             _ => unreachable!(),
         })
     }
