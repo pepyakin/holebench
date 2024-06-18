@@ -12,6 +12,7 @@ use std::{
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::PathBuf,
 };
+use indicatif::{ProgressBar, ProgressStyle};
 
 use cli::Cli;
 use junk::JunkBuf;
