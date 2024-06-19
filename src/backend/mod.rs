@@ -35,8 +35,11 @@ unsafe impl Send for OpTy {}
 pub struct Op {
     pub ty: OpTy,
     pub result: i32,
+    /// The instant when the app created this Op.
     pub created: Option<Instant>,
+    /// The instant just before the IO loop submitted the operation to the kernel.
     pub submitted: Option<Instant>,
+    /// The instant just after the IO loop acknowledged the completion of the IO.
     pub retired: Option<Instant>,
     pub user_data: u64,
 }

@@ -249,29 +249,12 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
     let backend = backend(&file, o);
     let mut index = 0;
     let loop_start = Instant::now();
-    let mut second_start = Instant::now();
-    let mut iops = 0;
     let mut ramping_up = true;
-    let mut latencies_h = Histogram::<u64>::new_with_bounds(1, 1000000000, 3).unwrap();
+    let mut m = Metrics::new();
 
     let mut buf_pool = BufPool::new(o.bs);
     loop {
-        if iops > 1000 && second_start.elapsed().as_millis() > 1000 {
-            second_start = Instant::now();
-
-            let cur = iops;
-            iops = 0;
-            println!("cur: {}", cur);
-
-            if !ramping_up {
-                // Print out the latencies for various percentiles.
-                for q in [0.001, 0.01, 0.25, 0.50, 0.75, 0.95, 0.99, 0.999] {
-                    let lat = latencies_h.value_at_quantile(q);
-                    println!("{}th: {} ns", q * 100.0, lat);
-                }
-                println!("mean={} ns", latencies_h.mean());
-            }
-        }
+        m.on_tick();
 
         if ramping_up {
             if loop_start.elapsed() >= o.ramp_time {
@@ -299,12 +282,8 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
                 buf_pool.release(buf_index);
 
                 if !ramping_up {
-                    // Do the bookkeeping, but only if we are not ramping up.
-                    let dur = op.retired.unwrap() - op.submitted.unwrap();
-                    let dur_nanos = dur.as_nanos().try_into().unwrap();
-                    latencies_h.record(dur_nanos).unwrap();
+                    m.on_op_complete(op);
                 }
-                iops += 1;
             }
             None => {
                 panic!()
@@ -331,13 +310,11 @@ impl BufPool {
     pub fn checkout(&mut self) -> (usize, *mut u8, usize) {
         let index = match self.free.pop() {
             Some(index) => index,
-            _ => {
-                unsafe {
-                    let layout = std::alloc::Layout::from_size_align(self.bs, self.bs).unwrap();
-                    let ptr = std::alloc::alloc_zeroed(layout);
-                    self.pool.insert(ptr)
-                }
-            }
+            _ => unsafe {
+                let layout = std::alloc::Layout::from_size_align(self.bs, self.bs).unwrap();
+                let ptr = std::alloc::alloc_zeroed(layout);
+                self.pool.insert(ptr)
+            },
         };
         let (ptr, len) = self.get_ptr_and_len(index);
         (index, ptr, len)
@@ -350,5 +327,74 @@ impl BufPool {
     fn get_ptr_and_len(&self, index: usize) -> (*mut u8, usize) {
         let buf = self.pool[index];
         (buf, self.bs)
+    }
+}
+
+struct Metrics {
+    second_start: Instant,
+    running_iops: usize,
+    last_iops: usize,
+    histogram_total: Histogram<u64>,
+    histogram_completion: Histogram<u64>,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        Self {
+            second_start: Instant::now(),
+            running_iops: 0,
+            last_iops: 0,
+            histogram_total: Histogram::new(5).unwrap(),
+            histogram_completion: Histogram::new(5).unwrap(),
+        }
+    }
+
+    /// Called every now and then. Displays data if needed.
+    pub fn on_tick(&mut self) {
+        // Avoid checking the time too often.
+        if self.running_iops < 1000 {
+            return;
+        }
+
+        if self.second_start.elapsed().as_millis() < 1000 {
+            return;
+        }
+
+        self.second_start = Instant::now();
+
+        self.last_iops = self.running_iops;
+        self.running_iops = 0;
+        self.display();
+    }
+
+    pub fn on_op_complete(&mut self, op: Op) {
+        let now = Instant::now();
+        let total = now - op.created.unwrap();
+        let completion = op.retired.unwrap() - op.submitted.unwrap();
+
+        self.histogram_total
+            .record(total.as_nanos() as u64)
+            .unwrap();
+        self.histogram_completion
+            .record(completion.as_nanos() as u64)
+            .unwrap();
+
+        self.running_iops += 1;
+    }
+
+    fn display(&self) {
+        println!("iops: {}", self.last_iops);
+        println!(
+            "total lat ns: {} (50th: {}, 99th: {})",
+            self.histogram_total.mean(),
+            self.histogram_total.value_at_quantile(0.50),
+            self.histogram_total.value_at_quantile(0.99),
+        );
+        println!(
+            "completion lat ns: {} (50th: {}, 99th: {})",
+            self.histogram_completion.mean(),
+            self.histogram_completion.value_at_quantile(0.50),
+            self.histogram_completion.value_at_quantile(0.99),
+        );
     }
 }
