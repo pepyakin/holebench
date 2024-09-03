@@ -12,7 +12,6 @@ debug = 1
 anyhow = "1.0.80"
 clap = { version = "4.5.1", features = ["derive"] }
 hdrhistogram = "7.5.4"
-io-uring = "0.6.3"
 libc = "0.2.153"
 rand = "0.8.5"
 rand_pcg = "0.3.1"
@@ -20,3 +19,7 @@ rayon = "1.9.0"
 slab = "0.4.9"
 crossbeam = "0.8.4"
 indicatif = "0.17.8"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.6.3"
+

@@ -9,6 +9,9 @@ mod bytes_cnt;
 
 #[derive(Debug, Clone)]
 pub enum Backend {
+    /// Use the io_uring backend.
+    ///
+    /// This backend is only supported on Linux.
     IoUring,
     Mmap,
     Sync,
@@ -19,7 +22,13 @@ impl FromStr for Backend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
+            #[cfg(target_os = "linux")]
             "iouring" | "io_uring" | "io-uring" => Ok(Backend::IoUring),
+            #[cfg(not(target_os = "linux"))]
+            "iouring" | "io_uring" | "io-uring" => {
+                let _ = Backend::IoUring;
+                Err("IoUring backend is not supported on this platform".to_string())
+            }
             "mmap" => Ok(Backend::Mmap),
             "sync" => Ok(Backend::Sync),
             backend => Err(format!("Unknown backend: {backend}")),
@@ -84,6 +93,7 @@ pub struct Cli {
     ///
     /// On Linux, it is equivalent to the O_DIRECT flag. However, note that the O_DIRECT flag is
     /// not supported in combination with the mmap backend.
+    /// This flag is ignored on platforms other than Linux.
     #[clap(long, default_value = "false")]
     pub direct: bool,
 

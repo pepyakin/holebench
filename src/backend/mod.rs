@@ -1,6 +1,9 @@
 use std::time::Instant;
 
+
+#[cfg(target_os = "linux")]
 pub mod io_uring;
+
 pub mod mmap;
 pub mod sync;
 

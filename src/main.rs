@@ -8,11 +8,7 @@ use slab::Slab;
 use std::fs::File;
 use std::io::Write;
 use std::time::{Duration, Instant};
-use std::{
-    fs::OpenOptions,
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
-    path::PathBuf,
-};
+use std::{fs::OpenOptions, os::fd::AsRawFd, path::PathBuf};
 
 use cli::Cli;
 use junk::JunkBuf;
@@ -41,8 +37,10 @@ struct Opts {
     /// true if we should zero file (as in contrast to leave holes)
     no_sparse: bool,
     /// true if `falloc` with `FALLOC_FL_KEEP_SIZE` should be applied to the file.
+    #[allow(unused)]
     falloc_keep_size: bool,
     /// true if `falloc` with `FALLOC_FL_ZERO_RANGE` should be applied to the file.
+    #[allow(unused)]
     falloc_zero_range: bool,
     /// Skip layout phase. Assume file exists.
     skip_layout: bool,
@@ -114,7 +112,13 @@ fn parse_cli(cli: Cli) -> Result<&'static Opts> {
 
 fn backend(file: &File, o: &'static Opts) -> Box<dyn crate::backend::Backend> {
     match o.backend {
+        #[cfg(target_os = "linux")]
         cli::Backend::IoUring => crate::backend::io_uring::init(file.as_raw_fd(), o),
+        #[cfg(not(target_os = "linux"))]
+        cli::Backend::IoUring => {
+            // Should be checked elsewhere.
+            unreachable!()
+        }
         cli::Backend::Mmap => crate::backend::mmap::init(file.as_raw_fd(), o),
         cli::Backend::Sync => crate::backend::sync::init(file.as_raw_fd(), o),
     }
@@ -166,6 +170,7 @@ fn create_and_layout_file(
     // Extend the file size to the requested.
     file.set_len(o.size)?;
 
+    #[cfg(target_os = "linux")]
     if o.falloc_keep_size || o.falloc_zero_range {
         let mut flags = 0;
         if o.falloc_keep_size {
@@ -237,7 +242,9 @@ fn create_and_layout_file(
 fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
     let file = {
         let mut oo = OpenOptions::new();
+        #[cfg(target_os = "linux")]
         if o.direct {
+            use std::os::unix::fs::OpenOptionsExt as _;
             oo.custom_flags(libc::O_DIRECT);
         }
         oo.read(true);
