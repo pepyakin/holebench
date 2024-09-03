@@ -38,7 +38,7 @@ impl Mmap {
             if libc::posix_madvise(
                 self.base as *mut libc::c_void,
                 self.len,
-                libc::POSIX_MADV_RANDOM | libc::POSIX_FADV_DONTNEED,
+                libc::POSIX_MADV_RANDOM | libc::POSIX_MADV_DONTNEED,
             ) == -1
             {
                 panic!();
