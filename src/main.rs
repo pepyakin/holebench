@@ -50,6 +50,7 @@ struct Opts {
     backend: cli::Backend,
     direct: bool,
     num_jobs: usize,
+    read_rather_than_write: bool,
 }
 
 fn parse_cli(cli: Cli) -> Result<&'static Opts> {
@@ -109,6 +110,7 @@ fn parse_cli(cli: Cli) -> Result<&'static Opts> {
         backend: cli.backend,
         direct: cli.direct,
         num_jobs: cli.num_jobs,
+        read_rather_than_write: matches!(cli.workflow, cli::Workflow::RandRead),
     });
     Ok(Box::leak(o))
 }
@@ -277,11 +279,16 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
         }
 
         while !backend.is_full() {
+            // The backend is not full, submit an operation.
             let offset = pos[index];
             index = (index + 1) % pos.len();
 
             let (buf_index, ptr, len) = buf_pool.checkout();
-            let mut op = Op::read(ptr, len, offset);
+            let mut op = if o.read_rather_than_write {
+                Op::read(ptr, len, offset)
+            } else {
+                Op::write(ptr, len, offset)
+            };
             op.user_data = buf_index as u64;
             backend.submit(op)
         }

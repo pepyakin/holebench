@@ -3,7 +3,7 @@
 use std::str::FromStr;
 
 pub use bytes_cnt::BytesCnt;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 mod bytes_cnt;
 
@@ -34,6 +34,16 @@ impl FromStr for Backend {
             backend => Err(format!("Unknown backend: {backend}")),
         }
     }
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+pub enum Workflow {
+    /// Random read workload.
+    #[value(name = "randread", alias = "rr")]
+    RandRead,
+    /// Random write workload.
+    #[value(name = "randwrite", alias = "rw")]
+    RandWrite,
 }
 
 #[derive(Parser, Debug)]
@@ -99,4 +109,8 @@ pub struct Cli {
 
     #[clap(long, default_value = "1")]
     pub num_jobs: usize,
+
+    /// The workflow to use for the test.
+    #[clap(long, default_value = "randread")]
+    pub workflow: Workflow,
 }
