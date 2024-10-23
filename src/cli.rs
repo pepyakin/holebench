@@ -42,8 +42,15 @@ pub enum Workflow {
     #[value(name = "randread", alias = "rr")]
     RandRead,
     /// Random write workload.
+    ///
+    /// This will write to the random locations in the file that were already allocated.
     #[value(name = "randwrite", alias = "rw")]
     RandWrite,
+    /// Random allocate workload.
+    ///
+    /// This will write into random locations in the file that were already allocated.
+    #[value(name = "randalloc", alias = "ra")]
+    RandAllocate,
 }
 
 #[derive(Parser, Debug)]

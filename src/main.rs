@@ -2,6 +2,8 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use hdrhistogram::Histogram;
 use indicatif::{ProgressBar, ProgressStyle};
+use rand::distributions::Uniform;
+use rand::prelude::Distribution as _;
 use rand::seq::SliceRandom;
 use rand::RngCore;
 use slab::Slab;
@@ -50,7 +52,11 @@ struct Opts {
     backend: cli::Backend,
     direct: bool,
     num_jobs: usize,
+    /// If true, then the read operation will be used. Otherwise, write will be used.
     read_rather_than_write: bool,
+    /// If true, then the offset will be random (still a multiple of the block size).
+    /// Otherwise, the offset will be one of the populated blocks during layout.
+    random_offset: bool,
 }
 
 fn parse_cli(cli: Cli) -> Result<&'static Opts> {
@@ -111,6 +117,7 @@ fn parse_cli(cli: Cli) -> Result<&'static Opts> {
         direct: cli.direct,
         num_jobs: cli.num_jobs,
         read_rather_than_write: matches!(cli.workflow, cli::Workflow::RandRead),
+        random_offset: matches!(cli.workflow, cli::Workflow::RandAllocate),
     });
     Ok(Box::leak(o))
 }
@@ -151,7 +158,12 @@ fn main() -> Result<()> {
     if !o.skip_layout {
         create_and_layout_file(&o, &mut rng, &popix, &junk)?;
     }
-    measure(&o, popix)?;
+    let mut offset_gen = if o.random_offset {
+        OffsetGen::new_random(Box::new(rng), o)
+    } else {
+        OffsetGen::new_predefined(popix)
+    };
+    measure(&o, &mut offset_gen)?;
 
     Ok(())
 }
@@ -248,7 +260,45 @@ fn create_and_layout_file(
     Ok(())
 }
 
-fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
+enum OffsetGen {
+    Predefined {
+        pos: Vec<u64>,
+        index: usize,
+    },
+    Random {
+        rng: Box<dyn RngCore>,
+        dist: Uniform<u64>,
+        bs: u64,
+    },
+}
+
+impl OffsetGen {
+    fn new_predefined(pos: Vec<u64>) -> Self {
+        Self::Predefined { pos, index: 0 }
+    }
+
+    fn new_random(rng: Box<dyn RngCore>, o: &Opts) -> Self {
+        Self::Random {
+            rng,
+            dist: Uniform::new(0, o.n_blocks),
+            bs: o.bs,
+        }
+    }
+
+    /// Returns next offset to write to or read from. Multiple of the block size.
+    fn next(&mut self) -> u64 {
+        match self {
+            OffsetGen::Predefined { pos, index } => {
+                let offset = pos[*index];
+                *index = (*index + 1) % pos.len();
+                offset
+            }
+            OffsetGen::Random { rng, dist, bs } => dist.sample(rng) * *bs,
+        }
+    }
+}
+
+fn measure(o: &'static Opts, offset_gen: &mut OffsetGen) -> Result<()> {
     let file = {
         let mut oo = OpenOptions::new();
         #[cfg(target_os = "linux")]
@@ -263,7 +313,6 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
     .open(&o.filename)?;
 
     let backend = backend(&file, o);
-    let mut index = 0;
     let loop_start = Instant::now();
     let mut ramping_up = true;
     let mut m = Metrics::new();
@@ -280,8 +329,7 @@ fn measure(o: &'static Opts, pos: Vec<u64>) -> Result<()> {
 
         while !backend.is_full() {
             // The backend is not full, submit an operation.
-            let offset = pos[index];
-            index = (index + 1) % pos.len();
+            let offset = offset_gen.next();
 
             let (buf_index, ptr, len) = buf_pool.checkout();
             let mut op = if o.read_rather_than_write {
