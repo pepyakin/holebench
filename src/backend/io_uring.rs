@@ -159,10 +159,6 @@ fn op_to_sqe(fd: i32, op: &Op) -> io_uring::squeue::Entry {
             opcode::Read::new(fd, *buf, *len as u32).offset(*at).build()
         }
         OpTy::Write(Write { buf, len, at }) => {
-            // unsafe {
-            //     let slice = std::slice::from_raw_parts(*buf, *len as usize);
-            //     println!("write: {:?}", slice);
-            // }
             opcode::Write::new(fd, *buf, *len as u32)
                 .offset(*at)
                 .build()
