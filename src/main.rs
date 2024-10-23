@@ -85,6 +85,9 @@ fn parse_cli(cli: Cli) -> Result<&'static Opts> {
         if !filename.exists() {
             bail!("--skip-layout passed and file does not exist!");
         }
+        if cli.no_sparse {
+            eprintln!("warning: --skip-layout prevents --no-sparse from being used");
+        }
     }
 
     if cli.direct && matches!(cli.backend, cli::Backend::Mmap) {
