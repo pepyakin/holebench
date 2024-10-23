@@ -183,7 +183,11 @@ fn create_and_layout_file(
             flags |= libc::FALLOC_FL_ZERO_RANGE;
         }
         unsafe {
-            libc::fallocate(file.as_raw_fd(), flags, 0, o.size as i64);
+            let result = libc::fallocate(file.as_raw_fd(), flags, 0, o.size as i64);
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                bail!("Failed to fallocate: {}", error);
+            }
         }
     }
 
